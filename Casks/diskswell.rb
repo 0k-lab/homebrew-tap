@@ -1,6 +1,6 @@
 cask "diskswell" do
-  version "1.0.0"
-  sha256 "c41fcd1e5e7d0e9db60f39cbc98f4af4addb3cb438fe159ef18fbcc3d0ee5759"
+  version "1.1.0"
+  sha256 "d6db97ed1a86c1888de3508d94e0afd748514c5d5ee1c2f5ff760e906086be9a"
 
   url "https://github.com/kricha-lab/DiskSwell/releases/download/v#{version}/DiskSwell.pkg"
   name "DiskSwell"
