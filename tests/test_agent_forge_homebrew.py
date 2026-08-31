@@ -79,7 +79,12 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn("fail-fast: false", self.text)
         self.assertRegex(self.text, r"runner: macos-14\n\s+arch: arm64")
         self.assertRegex(self.text, r"runner: macos-15-intel\n\s+arch: x86_64")
-        for forbidden in ("workflow_run", "self-hosted", "contents: write", "pull-requests: write", "secrets."):
+        self.assertEqual(self.text.count("contents: write"), 1)
+        self.assertRegex(
+            self.text,
+            r"(?m)^  publish:\n(?:.*\n)*?    permissions:\n      contents: write$",
+        )
+        for forbidden in ("workflow_run", "self-hosted", "pull-requests: write", "secrets."):
             self.assertNotIn(forbidden, self.text)
 
     def test_only_pinned_reviewed_actions(self):
@@ -88,6 +93,7 @@ class WorkflowContract(unittest.TestCase):
             [
                 "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
                 "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+                "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
             ],
             uses,
         )
@@ -107,19 +113,44 @@ class WorkflowContract(unittest.TestCase):
         for binary in BINARIES:
             self.assertGreaterEqual(self.text.count(f'{binary} {TAG} {COMMIT}'), 2)
 
-    def test_bottle_is_bounded_uploaded_and_proven_poured(self):
+    def test_bottle_is_bounded_uploaded_and_inspected(self):
         for required in (
             f'brew bottle --json --root-url="{ROOT_URL}" 0k-lab/tap/agent-forge',
             'test "${#bottles[@]}" -eq 1',
             'test "${#json_files[@]}" -eq 1',
-            'brew install --force-bottle "${bottles[0]}"',
-            'poured_from_bottle',
+            'tar -xzf "${bottles[0]}" -C "$bottle_root"',
+            'prefix="$bottle_root/agent-forge/0.1.7"',
+            'test ! -e "$prefix/bin/forge-gate"',
             'name: agent-forge-bottle-${{ matrix.arch }}',
             'retention-days: 7',
             'if-no-files-found: error',
             'path: |',
             '${{ steps.bottle.outputs.tar }}',
             '${{ steps.bottle.outputs.json }}',
+        ):
+            self.assertIn(required, self.text)
+        self.assertNotIn('brew install --force-bottle "${bottles[0]}"', self.text)
+        self.assertNotIn("poured_from_bottle", self.text)
+
+    def test_post_merge_release_publication_is_scoped_and_immutable(self):
+        for required in (
+            "publish:",
+            "if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
+            "needs: bottle",
+            "contents: write",
+            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+            "pattern: agent-forge-bottle-*",
+            "merge-multiple: true",
+            'test "${#bottles[@]}" -eq 2',
+            'test "${#json_files[@]}" -eq 2',
+            'release_tag="agent-forge-v0.1.7"',
+            'gh release view "$release_tag"',
+            'gh release create "$release_tag"',
+            '--target "$GITHUB_SHA"',
+            '--draft',
+            'gh release edit "$release_tag"',
+            '--draft=false',
+            '--latest=false',
         ):
             self.assertIn(required, self.text)
 
