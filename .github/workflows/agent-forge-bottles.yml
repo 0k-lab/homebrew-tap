@@ -1,0 +1,71 @@
+name: Agent Forge bottles
+
+"on":
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  bottle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Tap checked-out repository
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          tap_dir="$(brew --repository)/Library/Taps/0k-lab/homebrew-tap"
+          test ! -e "$tap_dir"
+          mkdir -p "$(dirname "$tap_dir")"
+          ln -s "$GITHUB_WORKSPACE" "$tap_dir"
+
+      - name: Audit, build, and test source
+        run: |
+          brew audit --strict 0k-lab/tap/agent-forge
+          brew install --build-bottle 0k-lab/tap/agent-forge
+          brew test 0k-lab/tap/agent-forge
+          test "$(forge-worker --version)" = "forge-worker v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
+          test "$(forge-codex-plugin --version)" = "forge-codex-plugin v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
+          test "$(forge-ref-plugin --version)" = "forge-ref-plugin v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
+
+      - name: Build and prove local bottle
+        id: bottle
+        run: |
+          brew bottle --json --root-url="https://github.com/0k-lab/homebrew-tap/releases/download/agent-forge-v0.1.7" 0k-lab/tap/agent-forge
+          shopt -s nullglob
+          bottles=(agent-forge--*.bottle.tar.gz)
+          json_files=(agent-forge--*.bottle.json)
+          test "${#bottles[@]}" -eq 1
+          test "${#json_files[@]}" -eq 1
+          brew uninstall agent-forge
+          brew install --force-bottle "${bottles[0]}"
+          brew test 0k-lab/tap/agent-forge
+          test "$(forge-worker --version)" = "forge-worker v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
+          test "$(forge-codex-plugin --version)" = "forge-codex-plugin v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
+          test "$(forge-ref-plugin --version)" = "forge-ref-plugin v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
+          brew info --json=v2 agent-forge | ruby -rjson -e 'abort "not poured from bottle" unless JSON.parse(STDIN.read).fetch("formulae").first.fetch("installed").any? { |install| install["poured_from_bottle"] == true }'
+          printf 'tar=%s\njson=%s\n' "${bottles[0]}" "${json_files[0]}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: agent-forge-bottle-${{ matrix.arch }}
+          path: |
+            ${{ steps.bottle.outputs.tar }}
+            ${{ steps.bottle.outputs.json }}
+          retention-days: 7
+          if-no-files-found: error
