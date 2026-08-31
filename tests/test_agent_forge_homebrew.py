@@ -12,7 +12,9 @@ VERSION = "0.1.7"
 TAG = f"v{VERSION}"
 COMMIT = "ee034b53b5af660cfca66985959b566ecfdd0f73"
 SOURCE_SHA256 = "bec4fb1a01935d2df21166aca4d6ef7207b35fa1ecade07ca53998918f941596"
-ROOT_URL = "https://github.com/0k-lab/homebrew-tap/releases/download/agent-forge-v0.1.7"
+ROOT_URL = "https://github.com/0k-lab/homebrew-tap/releases/download/agent-forge-v0.1.7-1"
+ARM64_BOTTLE_SHA256 = "ccb029de9cd5c57171dab3b3c8e8ac4d1b4128264a132f963139b0cd311926a8"
+INTEL_BOTTLE_SHA256 = "32f3e8460d4e02af444b77ef5e4354d233a1144e3fa74cf89e387b72d824558d"
 BINARIES = {
     "forge-worker": "./cmd/forge-worker",
     "forge-codex-plugin": "./cmd/forge-codex-plugin",
@@ -64,8 +66,17 @@ class FormulaContract(unittest.TestCase):
         for binary in BINARIES:
             self.assertIn(f'assert_equal "{binary} {TAG} #{{commit}}", shell_output("#{{bin}}/{binary} --version").strip', self.text)
         lowered = self.text.lower()
-        for forbidden in ("bottle do", "service do", "license ", "forge-gate", "cask", "notar", "pkgshare", "etc.install", "var/"):
+        for forbidden in ("service do", "license ", "forge-gate", "cask", "notar", "pkgshare", "etc.install", "var/"):
             self.assertNotIn(forbidden, lowered)
+
+    def test_exact_published_bottles(self):
+        for required in (
+            "bottle do",
+            f'root_url "{ROOT_URL}"',
+            f'sha256 cellar: :any_skip_relocation, arm64_sonoma: "{ARM64_BOTTLE_SHA256}"',
+            f'sha256 cellar: :any_skip_relocation, sequoia: "{INTEL_BOTTLE_SHA256}"',
+        ):
+            self.assertIn(required, self.text)
 
 
 class WorkflowContract(unittest.TestCase):
@@ -77,82 +88,44 @@ class WorkflowContract(unittest.TestCase):
         self.assertRegex(self.text, r'(?m)^"on":\n  pull_request:\n  push:\n    branches: \[main\]$')
         self.assertRegex(self.text, r"(?m)^permissions:\n  contents: read$")
         self.assertIn("fail-fast: false", self.text)
-        self.assertRegex(self.text, r"runner: macos-14\n\s+arch: arm64")
+        self.assertRegex(self.text, r"runner: macos-15\n\s+arch: arm64")
         self.assertRegex(self.text, r"runner: macos-15-intel\n\s+arch: x86_64")
-        self.assertEqual(self.text.count("contents: write"), 1)
-        self.assertRegex(
-            self.text,
-            r"(?m)^  publish:\n(?:.*\n)*?    permissions:\n      contents: write$",
-        )
-        for forbidden in ("workflow_run", "self-hosted", "pull-requests: write", "secrets."):
+        for forbidden in ("workflow_run", "self-hosted", "contents: write", "pull-requests: write", "secrets."):
             self.assertNotIn(forbidden, self.text)
 
     def test_only_pinned_reviewed_actions(self):
         uses = re.findall(r"(?m)^\s*-?\s*uses:\s*(\S+)", self.text)
         self.assertEqual(
-            [
-                "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
-                "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-                "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
-            ],
+            ["actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"],
             uses,
         )
         self.assertNotIn("setup-", self.text)
 
-    def test_local_tap_source_build_and_identity(self):
+    def test_remote_bottle_install_and_identity(self):
         for required in (
             'ln -s "$GITHUB_WORKSPACE" "$tap_dir"',
             'test "$(uname -m)" = "${{ matrix.arch }}"',
             "brew audit --strict 0k-lab/tap/agent-forge",
-            "brew install --build-bottle 0k-lab/tap/agent-forge",
+            "brew install --force-bottle 0k-lab/tap/agent-forge",
             "brew test 0k-lab/tap/agent-forge",
+            'install["poured_from_bottle"] == true',
         ):
             self.assertIn(required, self.text)
         for forbidden in ("brew tap ", "git clone", "git fetch"):
             self.assertNotIn(forbidden, self.text)
         for binary in BINARIES:
-            self.assertGreaterEqual(self.text.count(f'{binary} {TAG} {COMMIT}'), 2)
+            self.assertEqual(self.text.count(f'{binary} {TAG} {COMMIT}'), 1)
 
-    def test_bottle_is_bounded_uploaded_and_inspected(self):
-        for required in (
-            f'brew bottle --json --root-url="{ROOT_URL}" 0k-lab/tap/agent-forge',
-            'test "${#bottles[@]}" -eq 1',
-            'test "${#json_files[@]}" -eq 1',
-            'tar -xzf "${bottles[0]}" -C "$bottle_root"',
-            'prefix="$bottle_root/agent-forge/0.1.7"',
-            'test ! -e "$prefix/bin/forge-gate"',
-            'name: agent-forge-bottle-${{ matrix.arch }}',
-            'retention-days: 7',
-            'if-no-files-found: error',
-            'path: |',
-            '${{ steps.bottle.outputs.tar }}',
-            '${{ steps.bottle.outputs.json }}',
-        ):
-            self.assertIn(required, self.text)
-        self.assertNotIn('brew install --force-bottle "${bottles[0]}"', self.text)
-        self.assertNotIn("poured_from_bottle", self.text)
-
-    def test_post_merge_release_publication_is_scoped_and_immutable(self):
-        for required in (
+    def test_no_build_or_publish_surface(self):
+        for forbidden in (
+            "--build-bottle",
+            "brew bottle",
+            "upload-artifact",
+            "download-artifact",
             "publish:",
-            "if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
-            "needs: bottle",
-            "contents: write",
-            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
-            "pattern: agent-forge-bottle-*",
-            "merge-multiple: true",
-            'test "${#bottles[@]}" -eq 2',
-            'test "${#json_files[@]}" -eq 2',
-            'release_tag="agent-forge-v0.1.7"',
-            'gh release view "$release_tag"',
-            'gh release create "$release_tag"',
-            '--target "$GITHUB_SHA"',
-            '--draft',
-            'gh release edit "$release_tag"',
-            '--draft=false',
-            '--latest=false',
+            "gh release",
         ):
-            self.assertIn(required, self.text)
+            self.assertNotIn(forbidden, self.text)
 
 
 class ReadmeContract(unittest.TestCase):

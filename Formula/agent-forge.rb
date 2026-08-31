@@ -4,6 +4,12 @@ class AgentForge < Formula
   url "https://github.com/0k-lab/agent-forge/archive/refs/tags/v0.1.7.tar.gz"
   sha256 "bec4fb1a01935d2df21166aca4d6ef7207b35fa1ecade07ca53998918f941596"
 
+  bottle do
+    root_url "https://github.com/0k-lab/homebrew-tap/releases/download/agent-forge-v0.1.7-1"
+    sha256 cellar: :any_skip_relocation, arm64_sonoma: "ccb029de9cd5c57171dab3b3c8e8ac4d1b4128264a132f963139b0cd311926a8"
+    sha256 cellar: :any_skip_relocation, sequoia: "32f3e8460d4e02af444b77ef5e4354d233a1144e3fa74cf89e387b72d824558d"
+  end
+
   depends_on :macos
   depends_on "go" => :build
 

@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             arch: arm64
           - runner: macos-15-intel
             arch: x86_64
@@ -34,80 +34,12 @@ jobs:
           mkdir -p "$(dirname "$tap_dir")"
           ln -s "$GITHUB_WORKSPACE" "$tap_dir"
 
-      - name: Audit, build, and test source
+      - name: Audit and prove remote bottle
         run: |
           brew audit --strict 0k-lab/tap/agent-forge
-          brew install --build-bottle 0k-lab/tap/agent-forge
+          brew install --force-bottle 0k-lab/tap/agent-forge
           brew test 0k-lab/tap/agent-forge
           test "$(forge-worker --version)" = "forge-worker v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
           test "$(forge-codex-plugin --version)" = "forge-codex-plugin v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
           test "$(forge-ref-plugin --version)" = "forge-ref-plugin v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
-
-      - name: Build and inspect local bottle
-        id: bottle
-        run: |
-          brew bottle --json --root-url="https://github.com/0k-lab/homebrew-tap/releases/download/agent-forge-v0.1.7" 0k-lab/tap/agent-forge
-          shopt -s nullglob
-          bottles=(agent-forge--*.bottle.tar.gz)
-          json_files=(agent-forge--*.bottle.json)
-          test "${#bottles[@]}" -eq 1
-          test "${#json_files[@]}" -eq 1
-          bottle_root="$(mktemp -d)"
-          tar -xzf "${bottles[0]}" -C "$bottle_root"
-          prefix="$bottle_root/agent-forge/0.1.7"
-          test -x "$prefix/bin/forge-worker"
-          test -x "$prefix/bin/forge-codex-plugin"
-          test -x "$prefix/bin/forge-ref-plugin"
-          test ! -e "$prefix/bin/forge-gate"
-          test "$("$prefix/bin/forge-worker" --version)" = "forge-worker v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
-          test "$("$prefix/bin/forge-codex-plugin" --version)" = "forge-codex-plugin v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
-          test "$("$prefix/bin/forge-ref-plugin" --version)" = "forge-ref-plugin v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
-          printf 'tar=%s\njson=%s\n' "${bottles[0]}" "${json_files[0]}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: agent-forge-bottle-${{ matrix.arch }}
-          path: |
-            ${{ steps.bottle.outputs.tar }}
-            ${{ steps.bottle.outputs.json }}
-          retention-days: 7
-          if-no-files-found: error
-
-  publish:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: bottle
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          pattern: agent-forge-bottle-*
-          path: dist
-          merge-multiple: true
-
-      - name: Publish immutable bottle release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          shopt -s nullglob
-          bottles=(dist/agent-forge--*.bottle.tar.gz)
-          json_files=(dist/agent-forge--*.bottle.json)
-          test "${#bottles[@]}" -eq 2
-          test "${#json_files[@]}" -eq 2
-          release_tag="agent-forge-v0.1.7"
-          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $release_tag already exists; refusing mutation" >&2
-            exit 1
-          fi
-          gh release create "$release_tag" "${bottles[@]}" "${json_files[@]}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "Agent Forge v0.1.7 bottles" \
-            --notes "Immutable Homebrew bottles for Agent Forge v0.1.7." \
-            --draft \
-            --latest=false
-          gh release edit "$release_tag" \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft=false \
-            --latest=false
+          brew info --json=v2 0k-lab/tap/agent-forge | ruby -rjson -e 'abort "not poured from bottle" unless JSON.parse(STDIN.read).fetch("formulae").first.fetch("installed").any? { |install| install["poured_from_bottle"] == true }'
