@@ -496,19 +496,21 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
         run: |
           set -euo pipefail
-          gh run list --repo 0k-lab/homebrew-tap --workflow agent-forge-bottles.yml --branch "$BRANCH" \
-            --event workflow_dispatch --limit 100 --json databaseId,url,event,headBranch,headSha > runs-before.json
-          run="$(jq -c --arg branch "$BRANCH" --arg sha "$BRANCH_SHA" \
-            '[.[] | select(.event == "workflow_dispatch" and .headBranch == $branch and .headSha == $sha)] | sort_by(.databaseId) | last // empty' runs-before.json)"
+          run_title="Agent Forge bottles $BRANCH_SHA"
+          gh run list --repo 0k-lab/homebrew-tap --workflow agent-forge-bottles.yml --branch main \
+            --event workflow_dispatch --limit 100 --json databaseId,url,event,headBranch,headSha,displayTitle > runs-before.json
+          run="$(jq -c --arg title "$run_title" --arg verifier_sha "$GITHUB_SHA" \
+            '[.[] | select(.event == "workflow_dispatch" and .headBranch == "main" and .headSha == $verifier_sha and .displayTitle == $title)] | sort_by(.databaseId) | last // empty' runs-before.json)"
           if test -z "$run"; then
             jq '[.[].databaseId]' runs-before.json > baseline-run-ids.json
-            gh workflow run agent-forge-bottles.yml --repo 0k-lab/homebrew-tap --ref "$BRANCH"
+            gh workflow run agent-forge-bottles.yml --repo 0k-lab/homebrew-tap --ref main \
+              --field verification_branch="$BRANCH" --field verification_sha="$BRANCH_SHA"
             for attempt in $(seq 1 38); do
               sleep 8
-              gh run list --repo 0k-lab/homebrew-tap --workflow agent-forge-bottles.yml --branch "$BRANCH" \
-                --event workflow_dispatch --limit 100 --json databaseId,url,event,headBranch,headSha > runs-after.json
-              run="$(jq -c --arg branch "$BRANCH" --arg sha "$BRANCH_SHA" --slurpfile baseline baseline-run-ids.json \
-                '[.[] | select(.event == "workflow_dispatch" and .headBranch == $branch and .headSha == $sha and (.databaseId as $id | $baseline[0] | index($id) | not))] | sort_by(.databaseId) | last // empty' runs-after.json)"
+              gh run list --repo 0k-lab/homebrew-tap --workflow agent-forge-bottles.yml --branch main \
+                --event workflow_dispatch --limit 100 --json databaseId,url,event,headBranch,headSha,displayTitle > runs-after.json
+              run="$(jq -c --arg title "$run_title" --arg verifier_sha "$GITHUB_SHA" --slurpfile baseline baseline-run-ids.json \
+                '[.[] | select(.event == "workflow_dispatch" and .headBranch == "main" and .headSha == $verifier_sha and .displayTitle == $title and (.databaseId as $id | $baseline[0] | index($id) | not))] | sort_by(.databaseId) | last // empty' runs-after.json)"
               test -z "$run" || break
             done
           fi

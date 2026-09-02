@@ -337,7 +337,7 @@ class WorkflowContractTests(unittest.TestCase):
         "Publish exact draft release":
             ("--method PATCH", "releases/$RELEASE_ID", "gh api", "state-plan"),
         "Dispatch or reuse exact-head verification":
-            ("gh run list", "gh workflow run agent-forge-bottles.yml", "sleep 8", "headSha"),
+            ("gh run list", "displayTitle", "--ref main", "--field verification_sha"),
     }
     critical_digests = {
         "Resolve exact transaction base": "98f9b905ec71a72d29769a3c799fdcf4a89509d8d34033a5613615e7fb653f9a",
@@ -349,7 +349,7 @@ class WorkflowContractTests(unittest.TestCase):
         "Create or resume draft bottle release": "01e0de5aa10a76cf1d8e5e05f3f495b6519ea69c3a75473069ad0ab8050a1408",
         "Read back exact draft assets": "65d4a493f9feb1b2b9d85db9fb8755a8f0dce34bd1aa82b217c53a4ea3c3ff22",
         "Publish exact draft release": "3d7bbc9cc64b3cba57c3632a3c3183030e0b5f6a2d2059e06c0b74bae45ea5d2",
-        "Dispatch or reuse exact-head verification": "44045be2824119bba16a5c9baf9243811560d2f158790cb9e5a10c2a1c04f396",
+        "Dispatch or reuse exact-head verification": "d1430a3750f63e86ea6acb9d18ac158b9497c689cd1236d66d32ed0ef2c52e03",
     }
 
     def validate(self, workflow):
@@ -395,6 +395,40 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(verify["permissions"], {"contents": "read"})
         self.assertIn("unittest discover", steps(verify["jobs"]["contract"])["Run automation contracts"]["run"])
 
+    def test_dispatched_verifier_uses_main_code_with_exact_formula_head(self):
+        bump_workflow = load_workflow(BUMP_WORKFLOW)
+        dispatch = steps(bump_workflow["jobs"]["state"])["Dispatch or reuse exact-head verification"]["run"]
+        self.assertIn('gh workflow run agent-forge-bottles.yml --repo 0k-lab/homebrew-tap --ref main', dispatch)
+        self.assertIn('--field verification_branch="$BRANCH"', dispatch)
+        self.assertIn('--field verification_sha="$BRANCH_SHA"', dispatch)
+        self.assertNotIn('--ref "$BRANCH"', dispatch)
+
+        verify = load_workflow(VERIFY_WORKFLOW)
+        inputs = verify["on"]["workflow_dispatch"]["inputs"]
+        self.assertEqual(set(inputs), {"verification_branch", "verification_sha"})
+        self.assertEqual(verify["run-name"], "Agent Forge bottles ${{ inputs.verification_sha || github.sha }}")
+        for job_name in ("contract", "bottle"):
+            checkout = steps(verify["jobs"][job_name])["Check out exact verifier revision"]
+            self.assertEqual(checkout["with"]["ref"], "${{ github.sha }}")
+        validate_request = steps(verify["jobs"]["contract"])["Validate exact Formula verification request"]
+        self.assertEqual(hashlib.sha256(validate_request["run"].encode()).hexdigest(),
+                         "bfb7a839c868d98f85c83af3482ee10645cc157585c8b90b2d9b9df9a2a4859e")
+        materialize = steps(verify["jobs"]["bottle"])["Materialize exact Formula verification head"]
+        self.assertEqual(hashlib.sha256(materialize["run"].encode()).hexdigest(),
+                         "5b50a0bd590982f83456e032790cf136ae992a89461184dbe78f280990832ab2")
+        self.assertEqual(materialize["if"], "github.event_name == 'workflow_dispatch'")
+        self.assertEqual(materialize["env"], {
+            "VERIFICATION_BRANCH": "${{ inputs.verification_branch }}",
+            "VERIFICATION_SHA": "${{ inputs.verification_sha }}",
+        })
+        for required in (
+            'test "$GITHUB_REF" = refs/heads/main',
+            'refs/heads/$VERIFICATION_BRANCH',
+            'test "$remote_sha" = "$VERIFICATION_SHA"',
+            'git show "$VERIFICATION_SHA:Formula/agent-forge.rb" > Formula/agent-forge.rb',
+        ):
+            self.assertIn(required, materialize["run"])
+
     def test_duplicate_yaml_keys_rejected(self):
         with self.assertRaises(ConstructorError):
             yaml.load("x: 1\nx: 2\n", Loader=UniqueBaseLoader)
@@ -420,17 +454,20 @@ class WorkflowContractTests(unittest.TestCase):
     def test_noop_dispatch_with_required_text_in_comment_rejected(self):
         fixture = load_workflow(BUMP_WORKFLOW)
         step = steps(fixture["jobs"]["state"])["Dispatch or reuse exact-head verification"]
-        step["run"] = step["run"].replace(
-            "gh workflow run agent-forge-bottles.yml --repo 0k-lab/homebrew-tap --ref \"$BRANCH\"",
-            "true # gh workflow run agent-forge-bottles.yml --repo 0k-lab/homebrew-tap --ref \"$BRANCH\"",
+        original = step["run"]
+        step["run"] = original.replace(
+            "gh workflow run agent-forge-bottles.yml --repo 0k-lab/homebrew-tap --ref main",
+            "true # disabled exact verifier dispatch",
         )
+        self.assertNotEqual(step["run"], original)
         with self.assertRaises(AssertionError):
             self.validate(fixture)
 
     def test_duplicate_critical_dispatch_rejected(self):
         fixture = load_workflow(BUMP_WORKFLOW)
         step = steps(fixture["jobs"]["state"])["Dispatch or reuse exact-head verification"]
-        step["run"] += "\ngh workflow run agent-forge-bottles.yml --repo 0k-lab/homebrew-tap --ref \"$BRANCH\""
+        step["run"] += ('\ngh workflow run agent-forge-bottles.yml --repo 0k-lab/homebrew-tap --ref main '
+                        '--field verification_branch="$BRANCH" --field verification_sha="$BRANCH_SHA"')
         with self.assertRaises(AssertionError):
             self.validate(fixture)
 
