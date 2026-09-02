@@ -326,8 +326,10 @@ class WorkflowContractTests(unittest.TestCase):
         "Create or validate exact bump branch": ("git push origin", "git ls-remote --heads"),
         "Create or validate exact non-draft pull request": ("gh pr create", "gh pr view", "headRefOid"),
         "Create or resume draft bottle release": ("gh release create", "gh release upload"),
-        "Read back exact draft assets": ("gh api", "state-plan", "gh release download", "cmp "),
-        "Publish exact draft release": ("gh release edit", "--draft=false", "gh api", "state-plan"),
+        "Read back exact draft assets":
+            ("releases?per_page=100", "state-plan", "releases/assets/$asset_id", "cmp "),
+        "Publish exact draft release":
+            ("--method PATCH", "releases/$RELEASE_ID", "gh api", "state-plan"),
         "Dispatch or reuse exact-head verification":
             ("gh run list", "gh workflow run agent-forge-bottles.yml", "sleep 8", "headSha"),
     }
@@ -336,8 +338,8 @@ class WorkflowContractTests(unittest.TestCase):
         "Create or validate exact bump branch": "6ccb0a12b5b5fb20e9ce01ca6341eb16aab78d3af21d2231bbe08d844ce64fe8",
         "Create or validate exact non-draft pull request": "39ebea8bfea27f2503547f93b20bc8118f6a307e374619a11db94b6ed0c23064",
         "Create or resume draft bottle release": "01e0de5aa10a76cf1d8e5e05f3f495b6519ea69c3a75473069ad0ab8050a1408",
-        "Read back exact draft assets": "76a52f702d8338e1301210a89e7021fb1bd43b8167e9201e399742d2248c3109",
-        "Publish exact draft release": "752ed1e303f891cc6adfb26af17e6d1b9bfc871e52515fba14315e680e8928ea",
+        "Read back exact draft assets": "495b4b945d8a8d64864c5cf398ae245e78ddd72c0e73c474f71d7fac58fc667a",
+        "Publish exact draft release": "7b97242cab250e1771a43df53b0f72b3e116ff2f255074de05e9909afe13501a",
         "Dispatch or reuse exact-head verification": "44045be2824119bba16a5c9baf9243811560d2f158790cb9e5a10c2a1c04f396",
     }
 
@@ -432,6 +434,20 @@ class WorkflowContractTests(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             self.validate(fixture)
+
+    def test_draft_readback_and_publish_use_release_and_asset_ids(self):
+        workflow = load_workflow(BUMP_WORKFLOW)
+        state_steps = steps(workflow["jobs"]["state"])
+        readback = state_steps["Read back exact draft assets"]["run"]
+        self.assertIn("releases?per_page=100", readback)
+        self.assertIn('releases/assets/$asset_id', readback)
+        self.assertNotIn("releases/tags/", readback)
+        self.assertNotIn("gh release download", readback)
+        publish = state_steps["Publish exact draft release"]
+        self.assertEqual(publish["env"]["RELEASE_ID"], "${{ steps.readback.outputs.release_id }}")
+        self.assertIn('repos/0k-lab/homebrew-tap/releases/$RELEASE_ID', publish["run"])
+        self.assertNotIn("gh release edit", publish["run"])
+        self.assertNotIn("releases/tags/", publish["run"])
 
 
 if __name__ == "__main__":
