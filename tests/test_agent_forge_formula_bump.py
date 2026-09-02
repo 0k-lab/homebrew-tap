@@ -343,7 +343,7 @@ class WorkflowContractTests(unittest.TestCase):
         "Resolve exact transaction base": "98f9b905ec71a72d29769a3c799fdcf4a89509d8d34033a5613615e7fb653f9a",
         "Validate exact artifact origin": "5a97d383b450101acab88eb5db460b8e44f98fa145414556917a7178937f6d06",
         "Validate exact artifact identity": "3d8e90b0bb3efd8829fc57913810dd4351661980ce2ed2f9875251007021ba04",
-        "Inspect resumable branch, PR, and release state": "5f6c335a4bb61a13a38d49b5628b24d7663c29926481081b9d6361bc2873975d",
+        "Inspect resumable branch, PR, and release state": "810a758358a70a95974551b39b33cbfdfd7fcd09aae21badcae02dd4a843656e",
         "Create or validate exact bump branch": "6ccb0a12b5b5fb20e9ce01ca6341eb16aab78d3af21d2231bbe08d844ce64fe8",
         "Create or validate exact non-draft pull request": "2439c6fc6571191416bdcdce955d6524b943a302765a243e85c110d16b110938",
         "Create or resume draft bottle release": "01e0de5aa10a76cf1d8e5e05f3f495b6519ea69c3a75473069ad0ab8050a1408",
@@ -497,6 +497,12 @@ class WorkflowContractTests(unittest.TestCase):
             if "agent_forge_bump.py" in run:
                 self.assertIn("$RUNNER_TEMP/agent_forge_bump.py", run)
                 self.assertNotIn("python3 scripts/agent_forge_bump.py", run)
+
+    def test_same_repository_pr_lookup_uses_plain_head_branch(self):
+        workflow = load_workflow(BUMP_WORKFLOW)
+        run = steps(workflow["jobs"]["state"])["Inspect resumable branch, PR, and release state"]["run"]
+        self.assertIn('gh pr list --repo 0k-lab/homebrew-tap --state all --head "$BRANCH"', run)
+        self.assertNotIn('--head "0k-lab:$BRANCH"', run)
 
     def test_draft_readback_and_publish_use_release_and_asset_ids(self):
         workflow = load_workflow(BUMP_WORKFLOW)

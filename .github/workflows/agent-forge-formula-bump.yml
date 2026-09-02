@@ -312,7 +312,7 @@ jobs:
             git diff-tree --no-commit-id --name-only -r refs/remotes/origin/bump-state > branch-files.txt
             git show refs/remotes/origin/bump-state:Formula/agent-forge.rb | sha256sum | cut -d' ' -f1 > branch-formula-sha.txt
           fi
-          gh pr list --repo 0k-lab/homebrew-tap --state all --head "0k-lab:$BRANCH" \
+          gh pr list --repo 0k-lab/homebrew-tap --state all --head "$BRANCH" \
             --json number,url,state,isDraft,baseRefName,headRefName,headRefOid,title,body > prs.json
           gh api --paginate --slurp -H "X-GitHub-Api-Version: 2022-11-28" \
             "repos/0k-lab/homebrew-tap/releases?per_page=100" > releases.json
