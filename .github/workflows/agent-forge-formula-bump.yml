@@ -7,6 +7,10 @@ name: Bump Agent Forge Formula
         description: Exact stable release tag (vMAJOR.MINOR.PATCH)
         required: true
         type: string
+      artifact_run_id:
+        description: Exact origin workflow run ID for recovery (defaults to this run)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -161,24 +165,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Download source candidate
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: agent-forge-source-candidate
-          path: candidate
-
-      - name: Download arm64 bottle
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: agent-forge-bottle-arm64
-          path: bottle-artifacts/arm64
-
-      - name: Download Intel bottle
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: agent-forge-bottle-x86_64
-          path: bottle-artifacts/x86_64
-
       - name: Resolve exact transaction base
         id: transaction
         env:
@@ -203,6 +189,61 @@ jobs:
           git switch --detach "$base_sha"
           test "$(git rev-parse HEAD)" = "$base_sha"
           printf 'base_sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Validate exact artifact origin
+        id: artifact-origin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id || github.run_id }}
+          TRANSACTION_BASE_SHA: ${{ steps.transaction.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          run_json="$(gh api -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/0k-lab/homebrew-tap/actions/runs/$ARTIFACT_RUN_ID")"
+          jq -e --arg base "$TRANSACTION_BASE_SHA" \
+            '.path == ".github/workflows/agent-forge-formula-bump.yml" and
+             .event == "workflow_dispatch" and .head_branch == "main" and
+             .head_sha == $base and .repository.full_name == "0k-lab/homebrew-tap"' \
+            <<<"$run_json" >/dev/null
+          printf 'run_id=%s\n' "$ARTIFACT_RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download source candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: agent-forge-source-candidate
+          path: candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.artifact-origin.outputs.run_id }}
+
+      - name: Download arm64 bottle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: agent-forge-bottle-arm64
+          path: bottle-artifacts/arm64
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.artifact-origin.outputs.run_id }}
+
+      - name: Download Intel bottle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: agent-forge-bottle-x86_64
+          path: bottle-artifacts/x86_64
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.artifact-origin.outputs.run_id }}
+
+      - name: Validate exact artifact identity
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
+          EXPECTED_TAG: ${{ needs.prepare.outputs.tag }}
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          EXPECTED_SOURCE_SHA256: ${{ needs.prepare.outputs.source_sha256 }}
+        run: |
+          set -euo pipefail
+          jq -e --arg version "$EXPECTED_VERSION" --arg tag "$EXPECTED_TAG" \
+            --arg commit "$EXPECTED_COMMIT" --arg source_sha "$EXPECTED_SOURCE_SHA256" \
+            '.version == $version and .tag == $tag and .commit == $commit and
+             .source_sha256 == $source_sha' candidate/upstream.json >/dev/null
 
       - name: Render exact final Formula and deterministic commit
         id: expected
