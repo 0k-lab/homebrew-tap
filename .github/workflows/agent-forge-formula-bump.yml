@@ -179,16 +179,41 @@ jobs:
           name: agent-forge-bottle-x86_64
           path: bottle-artifacts/x86_64
 
+      - name: Resolve exact transaction base
+        id: transaction
+        env:
+          CURRENT_BASE_SHA: ${{ github.sha }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          branch="bump/agent-forge-$TAG"
+          verifier="$RUNNER_TEMP/agent_forge_bump.py"
+          cp scripts/agent_forge_bump.py "$verifier"
+          test "$(sha256sum "$verifier" | cut -d' ' -f1)" = "$(sha256sum scripts/agent_forge_bump.py | cut -d' ' -f1)"
+          remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)"
+          base_sha="$CURRENT_BASE_SHA"
+          if test -n "$remote_sha"; then
+            git -c http.proxy= -c https.proxy= fetch --no-tags origin "+refs/heads/$branch:refs/remotes/origin/transaction-base"
+            parent_line="$(git rev-list --parents -n1 refs/remotes/origin/transaction-base)"
+            test "$(wc -w <<<"$parent_line" | tr -d ' ')" = 2
+            test "$(cut -d' ' -f1 <<<"$parent_line")" = "$remote_sha"
+            base_sha="$(cut -d' ' -f2 <<<"$parent_line")"
+            git merge-base --is-ancestor "$base_sha" "$CURRENT_BASE_SHA"
+          fi
+          git switch --detach "$base_sha"
+          test "$(git rev-parse HEAD)" = "$base_sha"
+          printf 'base_sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
+
       - name: Render exact final Formula and deterministic commit
         id: expected
         env:
-          BASE_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ steps.transaction.outputs.base_sha }}
           TAG: ${{ needs.prepare.outputs.tag }}
           COMMIT: ${{ needs.prepare.outputs.commit }}
           SOURCE_SHA256: ${{ needs.prepare.outputs.source_sha256 }}
         run: |
           set -euo pipefail
-          python3 scripts/agent_forge_bump.py render-final --formula candidate/agent-forge.rb \
+          python3 "$RUNNER_TEMP/agent_forge_bump.py" render-final --formula candidate/agent-forge.rb \
             --artifacts bottle-artifacts --output agent-forge.final.rb --metadata bottle-manifest.json
           cp agent-forge.final.rb Formula/agent-forge.rb
           test "$(git diff --name-only)" = "Formula/agent-forge.rb"
@@ -266,7 +291,7 @@ jobs:
               "prs": json.load(open("prs.json")), "release": matches[0] if matches else None,
               "release_tag_sha": release_tag_sha or None}))
           PY
-          python3 scripts/agent_forge_bump.py state-plan --expected expected-state.json \
+          python3 "$RUNNER_TEMP/agent_forge_bump.py" state-plan --expected expected-state.json \
             --state observed-state.json --output state-plan.json --github-output "$GITHUB_OUTPUT"
 
       - name: Create or validate exact bump branch
@@ -319,7 +344,7 @@ jobs:
           state["prs"] = [json.loads(sys.argv[1])]
           open("observed-state.json", "w").write(json.dumps(state))
           PY
-          python3 scripts/agent_forge_bump.py state-plan --expected expected-state.json \
+          python3 "$RUNNER_TEMP/agent_forge_bump.py" state-plan --expected expected-state.json \
             --state observed-state.json --output post-pr-plan.json
           printf 'pr_url=%s\npr_number=%s\n' "$pr_url" "$(jq -r .number <<<"$pr_json")" >> "$GITHUB_OUTPUT"
 
@@ -328,7 +353,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ACTION: ${{ steps.plan.outputs.release_action }}
           MISSING: ${{ steps.plan.outputs.missing_assets }}
-          BASE_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ steps.transaction.outputs.base_sha }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
@@ -366,7 +391,7 @@ jobs:
           state["release"] = matches[0]
           open("readback-state.json", "w").write(json.dumps(state))
           PY
-          python3 scripts/agent_forge_bump.py state-plan --expected expected-state.json \
+          python3 "$RUNNER_TEMP/agent_forge_bump.py" state-plan --expected expected-state.json \
             --state readback-state.json --output readback-plan.json --github-output "$GITHUB_OUTPUT"
           mkdir release-readback
           python3 - <<'PY' > release-assets.tsv
@@ -389,7 +414,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ACTION: ${{ steps.readback.outputs.release_action }}
           RELEASE_ID: ${{ steps.readback.outputs.release_id }}
-          BASE_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ steps.transaction.outputs.base_sha }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
@@ -417,7 +442,7 @@ jobs:
           test -n "$release_tag_sha"
           jq --arg sha "$release_tag_sha" '.release_tag_sha = $sha' public-state.json > public-state.tmp
           mv public-state.tmp public-state.json
-          python3 scripts/agent_forge_bump.py state-plan --expected expected-state.json \
+          python3 "$RUNNER_TEMP/agent_forge_bump.py" state-plan --expected expected-state.json \
             --state public-state.json --output final-state.json
           test "$(jq -r .release_action final-state.json)" = complete
 
