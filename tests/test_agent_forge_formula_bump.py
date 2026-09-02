@@ -321,6 +321,8 @@ class StateMachineTests(unittest.TestCase):
 
 class WorkflowContractTests(unittest.TestCase):
     critical = {
+        "Resolve exact transaction base":
+            ("git ls-remote --heads", "git rev-list --parents -n1", "git merge-base --is-ancestor", "git switch --detach"),
         "Inspect resumable branch, PR, and release state":
             ("git ls-remote --heads", "gh pr list", "releases?per_page=100", "state-plan"),
         "Create or validate exact bump branch": ("git push origin", "git ls-remote --heads"),
@@ -334,12 +336,13 @@ class WorkflowContractTests(unittest.TestCase):
             ("gh run list", "gh workflow run agent-forge-bottles.yml", "sleep 8", "headSha"),
     }
     critical_digests = {
-        "Inspect resumable branch, PR, and release state": "b817e8d10d06c935144f6ceb0a0b0c05a8936627d81f1cce3ed2469cab801104",
+        "Resolve exact transaction base": "98f9b905ec71a72d29769a3c799fdcf4a89509d8d34033a5613615e7fb653f9a",
+        "Inspect resumable branch, PR, and release state": "5f6c335a4bb61a13a38d49b5628b24d7663c29926481081b9d6361bc2873975d",
         "Create or validate exact bump branch": "6ccb0a12b5b5fb20e9ce01ca6341eb16aab78d3af21d2231bbe08d844ce64fe8",
-        "Create or validate exact non-draft pull request": "39ebea8bfea27f2503547f93b20bc8118f6a307e374619a11db94b6ed0c23064",
+        "Create or validate exact non-draft pull request": "2439c6fc6571191416bdcdce955d6524b943a302765a243e85c110d16b110938",
         "Create or resume draft bottle release": "01e0de5aa10a76cf1d8e5e05f3f495b6519ea69c3a75473069ad0ab8050a1408",
-        "Read back exact draft assets": "495b4b945d8a8d64864c5cf398ae245e78ddd72c0e73c474f71d7fac58fc667a",
-        "Publish exact draft release": "7b97242cab250e1771a43df53b0f72b3e116ff2f255074de05e9909afe13501a",
+        "Read back exact draft assets": "65d4a493f9feb1b2b9d85db9fb8755a8f0dce34bd1aa82b217c53a4ea3c3ff22",
+        "Publish exact draft release": "3d7bbc9cc64b3cba57c3632a3c3183030e0b5f6a2d2059e06c0b74bae45ea5d2",
         "Dispatch or reuse exact-head verification": "44045be2824119bba16a5c9baf9243811560d2f158790cb9e5a10c2a1c04f396",
     }
 
@@ -434,6 +437,33 @@ class WorkflowContractTests(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             self.validate(fixture)
+
+    def test_existing_transaction_uses_its_ancestor_base_with_current_verifier(self):
+        workflow = load_workflow(BUMP_WORKFLOW)
+        state_steps = steps(workflow["jobs"]["state"])
+        resolve = state_steps["Resolve exact transaction base"]["run"]
+        render = state_steps["Render exact final Formula and deterministic commit"]
+        self.assertIn("git merge-base --is-ancestor", resolve)
+        self.assertIn("git rev-list --parents -n1", resolve)
+        self.assertIn("$RUNNER_TEMP/agent_forge_bump.py", resolve)
+        self.assertIn("git switch --detach", resolve)
+        transaction_base = "${{ steps.transaction.outputs.base_sha }}"
+        self.assertEqual(render["env"]["BASE_SHA"], transaction_base)
+        self.assertEqual(state_steps["Create or resume draft bottle release"]["env"]["BASE_SHA"],
+                         transaction_base)
+        self.assertEqual(state_steps["Publish exact draft release"]["env"]["BASE_SHA"],
+                         transaction_base)
+        for name in (
+            "Render exact final Formula and deterministic commit",
+            "Inspect resumable branch, PR, and release state",
+            "Create or validate exact non-draft pull request",
+            "Read back exact draft assets",
+            "Publish exact draft release",
+        ):
+            run = state_steps[name]["run"]
+            if "agent_forge_bump.py" in run:
+                self.assertIn("$RUNNER_TEMP/agent_forge_bump.py", run)
+                self.assertNotIn("python3 scripts/agent_forge_bump.py", run)
 
     def test_draft_readback_and_publish_use_release_and_asset_ids(self):
         workflow = load_workflow(BUMP_WORKFLOW)
