@@ -4,12 +4,34 @@ name: Agent Forge bottles
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact verification revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run automation contracts
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml' || { echo "PyYAML is required" >&2; exit 1; }
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          python3 -m py_compile scripts/agent_forge_bump.py tests/test_agent_forge_formula_bump.py
+          if command -v ruby >/dev/null; then ruby -c Formula/agent-forge.rb; fi
+          git diff --check
+          git diff --exit-code
+
   bottle:
+    needs: contract
     strategy:
       fail-fast: false
       matrix:
@@ -24,7 +46,28 @@ jobs:
         shell: bash
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Check out exact verification revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify explicitly dispatched branch head
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "0k-lab/homebrew-tap"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          case "$GITHUB_REF" in refs/heads/bump/agent-forge-v*) ;; *) exit 1 ;; esac
+          git -c http.proxy= -c https.proxy= fetch --no-tags origin "+$GITHUB_REF:refs/remotes/origin/verification-head"
+          test "$(git rev-parse refs/remotes/origin/verification-head)" = "$EXPECTED_SHA"
+
+      - name: Read exact Formula identity
+        id: identity
+        run: python3 scripts/agent_forge_bump.py formula-identity --formula Formula/agent-forge.rb --github-output "$GITHUB_OUTPUT"
 
       - name: Tap checked-out repository
         run: |
@@ -36,10 +79,12 @@ jobs:
 
       - name: Audit and prove remote bottle
         run: |
+          set -euo pipefail
           brew audit --strict 0k-lab/tap/agent-forge
           brew install --force-bottle 0k-lab/tap/agent-forge
           brew test 0k-lab/tap/agent-forge
-          test "$(forge-worker --version)" = "forge-worker v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
-          test "$(forge-codex-plugin --version)" = "forge-codex-plugin v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
-          test "$(forge-ref-plugin --version)" = "forge-ref-plugin v0.1.7 ee034b53b5af660cfca66985959b566ecfdd0f73"
+          test "$(forge-worker --version)" = "forge-worker ${{ steps.identity.outputs.tag }} ${{ steps.identity.outputs.commit }}"
+          test "$(forge-codex-plugin --version)" = "forge-codex-plugin ${{ steps.identity.outputs.tag }} ${{ steps.identity.outputs.commit }}"
+          test "$(forge-ref-plugin --version)" = "forge-ref-plugin ${{ steps.identity.outputs.tag }} ${{ steps.identity.outputs.commit }}"
+          test ! -e "$(brew --prefix)/bin/forge-gate"
           brew info --json=v2 0k-lab/tap/agent-forge | ruby -rjson -e 'abort "not poured from bottle" unless JSON.parse(STDIN.read).fetch("formulae").first.fetch("installed").any? { |install| install["poured_from_bottle"] == true }'
