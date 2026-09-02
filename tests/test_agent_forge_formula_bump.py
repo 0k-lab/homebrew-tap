@@ -323,6 +323,10 @@ class WorkflowContractTests(unittest.TestCase):
     critical = {
         "Resolve exact transaction base":
             ("git ls-remote --heads", "git rev-list --parents -n1", "git merge-base --is-ancestor", "git switch --detach"),
+        "Validate exact artifact origin":
+            ("actions/runs/$ARTIFACT_RUN_ID", ".path ==", ".head_sha == $base", "run_id=%s"),
+        "Validate exact artifact identity":
+            (".version == $version", ".tag == $tag", ".commit == $commit", ".source_sha256 == $source_sha"),
         "Inspect resumable branch, PR, and release state":
             ("git ls-remote --heads", "gh pr list", "releases?per_page=100", "state-plan"),
         "Create or validate exact bump branch": ("git push origin", "git ls-remote --heads"),
@@ -337,6 +341,8 @@ class WorkflowContractTests(unittest.TestCase):
     }
     critical_digests = {
         "Resolve exact transaction base": "98f9b905ec71a72d29769a3c799fdcf4a89509d8d34033a5613615e7fb653f9a",
+        "Validate exact artifact origin": "5a97d383b450101acab88eb5db460b8e44f98fa145414556917a7178937f6d06",
+        "Validate exact artifact identity": "3d8e90b0bb3efd8829fc57913810dd4351661980ce2ed2f9875251007021ba04",
         "Inspect resumable branch, PR, and release state": "5f6c335a4bb61a13a38d49b5628b24d7663c29926481081b9d6361bc2873975d",
         "Create or validate exact bump branch": "6ccb0a12b5b5fb20e9ce01ca6341eb16aab78d3af21d2231bbe08d844ce64fe8",
         "Create or validate exact non-draft pull request": "2439c6fc6571191416bdcdce955d6524b943a302765a243e85c110d16b110938",
@@ -437,6 +443,33 @@ class WorkflowContractTests(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             self.validate(fixture)
+
+    def test_recovery_artifacts_are_pinned_to_validated_origin_run(self):
+        workflow = load_workflow(BUMP_WORKFLOW)
+        self.assertIn("artifact_run_id", workflow["on"]["workflow_dispatch"]["inputs"])
+        state_steps = steps(workflow["jobs"]["state"])
+        validate = state_steps["Validate exact artifact origin"]
+        self.assertEqual(validate["env"]["TRANSACTION_BASE_SHA"],
+                         "${{ steps.transaction.outputs.base_sha }}")
+        self.assertIn("actions/runs/$ARTIFACT_RUN_ID", validate["run"])
+        self.assertIn('.path == ".github/workflows/agent-forge-formula-bump.yml"', validate["run"])
+        self.assertIn('.event == "workflow_dispatch"', validate["run"])
+        self.assertIn('.head_sha == $base', validate["run"])
+        self.assertIn('.head_branch == "main"', validate["run"])
+        identity = state_steps["Validate exact artifact identity"]
+        self.assertEqual(identity["env"], {
+            "EXPECTED_VERSION": "${{ needs.prepare.outputs.version }}",
+            "EXPECTED_TAG": "${{ needs.prepare.outputs.tag }}",
+            "EXPECTED_COMMIT": "${{ needs.prepare.outputs.commit }}",
+            "EXPECTED_SOURCE_SHA256": "${{ needs.prepare.outputs.source_sha256 }}",
+        })
+        for predicate in ('.version == $version', '.tag == $tag', '.commit == $commit',
+                          '.source_sha256 == $source_sha'):
+            self.assertIn(predicate, identity["run"])
+        for name in ("Download source candidate", "Download arm64 bottle", "Download Intel bottle"):
+            with_ = state_steps[name]["with"]
+            self.assertEqual(with_["github-token"], "${{ github.token }}")
+            self.assertEqual(with_["run-id"], "${{ steps.artifact-origin.outputs.run_id }}")
 
     def test_existing_transaction_uses_its_ancestor_base_with_current_verifier(self):
         workflow = load_workflow(BUMP_WORKFLOW)
