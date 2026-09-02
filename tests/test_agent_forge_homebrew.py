@@ -85,7 +85,7 @@ class WorkflowContract(unittest.TestCase):
         cls.text = WORKFLOW.read_text()
 
     def test_safe_triggers_permissions_and_matrix(self):
-        self.assertRegex(self.text, r'(?m)^"on":\n  pull_request:\n  push:\n    branches: \[main\]$')
+        self.assertRegex(self.text, r'(?m)^"on":\n  pull_request:\n  push:\n    branches: \[main\]\n  workflow_dispatch:$')
         self.assertRegex(self.text, r"(?m)^permissions:\n  contents: read$")
         self.assertIn("fail-fast: false", self.text)
         self.assertRegex(self.text, r"runner: macos-15\n\s+arch: arm64")
@@ -96,7 +96,7 @@ class WorkflowContract(unittest.TestCase):
     def test_only_pinned_reviewed_actions(self):
         uses = re.findall(r"(?m)^\s*-?\s*uses:\s*(\S+)", self.text)
         self.assertEqual(
-            ["actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"],
+            ["actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"] * 2,
             uses,
         )
         self.assertNotIn("setup-", self.text)
@@ -114,7 +114,8 @@ class WorkflowContract(unittest.TestCase):
         for forbidden in ("brew tap ", "git clone", "git fetch"):
             self.assertNotIn(forbidden, self.text)
         for binary in BINARIES:
-            self.assertEqual(self.text.count(f'{binary} {TAG} {COMMIT}'), 1)
+            self.assertIn(f'{binary} ${{{{ steps.identity.outputs.tag }}}} ${{{{ steps.identity.outputs.commit }}}}', self.text)
+        self.assertNotIn(f"{TAG} {COMMIT}", self.text)
 
     def test_no_build_or_publish_surface(self):
         for forbidden in (

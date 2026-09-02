@@ -1,0 +1,444 @@
+name: Bump Agent Forge Formula
+
+"on":
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact stable release tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-forge-formula-bump-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.upstream.outputs.version }}
+      tag: ${{ steps.upstream.outputs.tag }}
+      commit: ${{ steps.upstream.outputs.commit }}
+      source_sha256: ${{ steps.upstream.outputs.source_sha256 }}
+    steps:
+      - name: Check out exact workflow revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run focused automation contracts before writes
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml' || { echo "PyYAML is required" >&2; exit 1; }
+          python3 -m unittest discover -s tests -p 'test_agent_forge_formula_bump.py'
+          python3 -m py_compile scripts/agent_forge_bump.py tests/test_agent_forge_formula_bump.py
+
+      - name: Verify exact main invocation identity
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "0k-lab/homebrew-tap"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git -c http.proxy= -c https.proxy= fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$EXPECTED_SHA"
+
+      - name: Verify public upstream release
+        id: upstream
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/agent_forge_bump.py verify-release --version "$VERSION" \
+            --formula Formula/agent-forge.rb --output upstream.json --github-output "$GITHUB_OUTPUT"
+
+      - name: Prepare source-only Formula
+        run: |
+          set -euo pipefail
+          mkdir candidate
+          python3 scripts/agent_forge_bump.py prepare-formula --formula Formula/agent-forge.rb \
+            --metadata upstream.json --output candidate/agent-forge.rb
+          cp upstream.json candidate/upstream.json
+
+      - name: Upload source candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: agent-forge-source-candidate
+          path: candidate
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            bottle_tag: arm64_sequoia
+          - runner: macos-15-intel
+            arch: x86_64
+            bottle_tag: sequoia
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out exact workflow revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download source candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: agent-forge-source-candidate
+          path: candidate
+
+      - name: Tap checked-out workspace
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          cp candidate/agent-forge.rb Formula/agent-forge.rb
+          tap_dir="$(brew --repository)/Library/Taps/0k-lab/homebrew-tap"
+          test ! -e "$tap_dir"
+          mkdir -p "$(dirname "$tap_dir")"
+          ln -s "$GITHUB_WORKSPACE" "$tap_dir"
+
+      - name: Build, prove payload, and bottle
+        env:
+          EXPECTED_TAG: ${{ needs.prepare.outputs.tag }}
+          EXPECTED_COMMIT: ${{ needs.prepare.outputs.commit }}
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
+          BOTTLE_TAG: ${{ matrix.bottle_tag }}
+        run: |
+          set -euo pipefail
+          brew audit --strict 0k-lab/tap/agent-forge
+          brew install --build-bottle 0k-lab/tap/agent-forge
+          brew test 0k-lab/tap/agent-forge
+          test "$(forge-worker --version)" = "forge-worker $EXPECTED_TAG $EXPECTED_COMMIT"
+          test "$(forge-codex-plugin --version)" = "forge-codex-plugin $EXPECTED_TAG $EXPECTED_COMMIT"
+          test "$(forge-ref-plugin --version)" = "forge-ref-plugin $EXPECTED_TAG $EXPECTED_COMMIT"
+          test ! -e "$(brew --prefix)/bin/forge-gate"
+          root_url="https://github.com/0k-lab/homebrew-tap/releases/download/agent-forge-$EXPECTED_TAG"
+          mkdir bottle-work
+          (cd bottle-work && brew bottle --json --root-url="$root_url" 0k-lab/tap/agent-forge)
+          python3 scripts/agent_forge_bump.py validate-bottle --directory bottle-work \
+            --version "$EXPECTED_VERSION" --tag "$BOTTLE_TAG" --root-url "$root_url" \
+            --commit "$EXPECTED_COMMIT" --output bottle-artifact
+          test "$(find bottle-artifact -maxdepth 1 -type f | wc -l | tr -d ' ')" = 2
+
+      - name: Upload architecture bottle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: agent-forge-bottle-${{ matrix.arch }}
+          path: bottle-artifact
+          if-no-files-found: error
+          retention-days: 1
+
+  state:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - name: Check out original tap main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download source candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: agent-forge-source-candidate
+          path: candidate
+
+      - name: Download arm64 bottle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: agent-forge-bottle-arm64
+          path: bottle-artifacts/arm64
+
+      - name: Download Intel bottle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: agent-forge-bottle-x86_64
+          path: bottle-artifacts/x86_64
+
+      - name: Render exact final Formula and deterministic commit
+        id: expected
+        env:
+          BASE_SHA: ${{ github.sha }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+          SOURCE_SHA256: ${{ needs.prepare.outputs.source_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 scripts/agent_forge_bump.py render-final --formula candidate/agent-forge.rb \
+            --artifacts bottle-artifacts --output agent-forge.final.rb --metadata bottle-manifest.json
+          cp agent-forge.final.rb Formula/agent-forge.rb
+          test "$(git diff --name-only)" = "Formula/agent-forge.rb"
+          branch="bump/agent-forge-$TAG"
+          git switch -c "$branch"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Formula/agent-forge.rb
+          test "$(git diff --cached --name-only)" = "Formula/agent-forge.rb"
+          GIT_AUTHOR_DATE=2000-01-01T00:00:00Z GIT_COMMITTER_DATE=2000-01-01T00:00:00Z git commit -m "agent-forge $TAG"
+          branch_sha="$(git rev-parse HEAD)"
+          formula_sha="$(sha256sum agent-forge.final.rb | cut -d' ' -f1)"
+          arm_sha="$(python3 -c 'import json; print(json.load(open("bottle-manifest.json"))["arm64_sequoia"])')"
+          intel_sha="$(python3 -c 'import json; print(json.load(open("bottle-manifest.json"))["sequoia"])')"
+          body="Upstream: $TAG at $COMMIT
+          Source SHA-256: $SOURCE_SHA256
+          arm64_sequoia bottle SHA-256: $arm_sha
+          sequoia bottle SHA-256: $intel_sha
+
+          Do not merge automatically. Merge manually only after the exact-head verification is green for $branch_sha."
+          printf '%s\n' "$body" > pr-body.txt
+          python3 - "$BASE_SHA" "$branch" "$branch_sha" "$formula_sha" "$TAG" "$COMMIT" "$SOURCE_SHA256" <<'PY'
+          import hashlib, json, pathlib, sys
+          base, branch, branch_sha, formula_sha, tag, commit, source_sha = sys.argv[1:]
+          assets = {}
+          for path in pathlib.Path("bottle-artifacts").rglob("*"):
+              if path.is_file():
+                  data = path.read_bytes()
+                  if path.name in assets: raise SystemExit("duplicate asset filename")
+                  assets[path.name] = {"size": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest()}
+          if len(assets) != 4: raise SystemExit("expected exactly four assets")
+          expected = {"base_sha": base, "branch": branch, "branch_sha": branch_sha,
+              "formula_sha256": formula_sha, "title": f"agent-forge {tag}",
+              "body": pathlib.Path("pr-body.txt").read_text(),
+              "release": {"tag_name": f"agent-forge-{tag}", "target_commitish": base,
+                          "name": f"Agent Forge {tag} bottles", "body": f"Homebrew bottles for Agent Forge {tag}."},
+              "assets": assets}
+          pathlib.Path("expected-state.json").write_text(json.dumps(expected, indent=2, sort_keys=True) + "\n")
+          PY
+          printf 'branch=%s\nbranch_sha=%s\n' "$branch" "$branch_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect resumable branch, PR, and release state
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.expected.outputs.branch }}
+        run: |
+          set -euo pipefail
+          remote_sha="$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)"
+          parent_line=""
+          if test -n "$remote_sha"; then
+            git -c http.proxy= -c https.proxy= fetch --no-tags origin "+refs/heads/$BRANCH:refs/remotes/origin/bump-state"
+            parent_line="$(git rev-list --parents -n1 refs/remotes/origin/bump-state)"
+            test "$(wc -w <<<"$parent_line" | tr -d ' ')" = 2
+            git diff-tree --no-commit-id --name-only -r refs/remotes/origin/bump-state > branch-files.txt
+            git show refs/remotes/origin/bump-state:Formula/agent-forge.rb | sha256sum | cut -d' ' -f1 > branch-formula-sha.txt
+          fi
+          gh pr list --repo 0k-lab/homebrew-tap --state all --head "0k-lab:$BRANCH" \
+            --json number,url,state,isDraft,baseRefName,headRefName,headRefOid,title,body > prs.json
+          gh api --paginate --slurp -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/0k-lab/homebrew-tap/releases?per_page=100" > releases.json
+          release_tag="$(python3 -c 'import json; print(json.load(open("expected-state.json"))["release"]["tag_name"])')"
+          release_tag_sha="$(git ls-remote --tags origin "refs/tags/$release_tag" "refs/tags/$release_tag^{}" | awk 'END {print $1}')"
+          python3 - "$remote_sha" "$parent_line" "$release_tag_sha" <<'PY'
+          import json, pathlib, sys
+          sha, parents, release_tag_sha = sys.argv[1:]
+          branch = None if not sha else {"sha": sha, "parent_sha": parents.split()[1],
+              "files": pathlib.Path("branch-files.txt").read_text().splitlines(),
+              "formula_sha256": pathlib.Path("branch-formula-sha.txt").read_text().strip()}
+          releases = [r for page in json.load(open("releases.json")) for r in page]
+          tag = json.load(open("expected-state.json"))["release"]["tag_name"]
+          matches = [r for r in releases if r.get("tag_name") == tag]
+          if len(matches) > 1: raise SystemExit("duplicate release tag")
+          pathlib.Path("observed-state.json").write_text(json.dumps({"branch": branch,
+              "prs": json.load(open("prs.json")), "release": matches[0] if matches else None,
+              "release_tag_sha": release_tag_sha or None}))
+          PY
+          python3 scripts/agent_forge_bump.py state-plan --expected expected-state.json \
+            --state observed-state.json --output state-plan.json --github-output "$GITHUB_OUTPUT"
+
+      - name: Create or validate exact bump branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ steps.plan.outputs.branch_action }}
+          BRANCH: ${{ steps.expected.outputs.branch }}
+          BRANCH_SHA: ${{ steps.expected.outputs.branch_sha }}
+        run: |
+          set -euo pipefail
+          if test "$ACTION" = create; then
+            gh auth setup-git
+            git push origin "HEAD:refs/heads/$BRANCH"
+          else
+            test "$ACTION" = reuse
+          fi
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$BRANCH_SHA"
+          python3 - <<'PY'
+          import json
+          expected, state = json.load(open("expected-state.json")), json.load(open("observed-state.json"))
+          state["branch"] = {"sha": expected["branch_sha"], "parent_sha": expected["base_sha"],
+              "files": ["Formula/agent-forge.rb"], "formula_sha256": expected["formula_sha256"]}
+          open("observed-state.json", "w").write(json.dumps(state))
+          PY
+
+      - name: Create or validate exact non-draft pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ steps.plan.outputs.pr_action }}
+          EXISTING_URL: ${{ steps.plan.outputs.pr_url }}
+          BRANCH: ${{ steps.expected.outputs.branch }}
+          BRANCH_SHA: ${{ steps.expected.outputs.branch_sha }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if test "$ACTION" = create; then
+            pr_url="$(gh pr create --repo 0k-lab/homebrew-tap --base main --head "$BRANCH" \
+              --title "agent-forge $TAG" --body-file pr-body.txt --no-maintainer-edit)"
+          else
+            test "$ACTION" = reuse
+            pr_url="$EXISTING_URL"
+          fi
+          pr_json="$(gh pr view "$pr_url" --repo 0k-lab/homebrew-tap \
+            --json number,url,state,isDraft,baseRefName,headRefName,headRefOid,title,body)"
+          test "$(jq -r .headRefOid <<<"$pr_json")" = "$BRANCH_SHA"
+          python3 - "$pr_json" <<'PY'
+          import json, sys
+          state = json.load(open("observed-state.json"))
+          state["prs"] = [json.loads(sys.argv[1])]
+          open("observed-state.json", "w").write(json.dumps(state))
+          PY
+          python3 scripts/agent_forge_bump.py state-plan --expected expected-state.json \
+            --state observed-state.json --output post-pr-plan.json
+          printf 'pr_url=%s\npr_number=%s\n' "$pr_url" "$(jq -r .number <<<"$pr_json")" >> "$GITHUB_OUTPUT"
+
+      - name: Create or resume draft bottle release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ steps.plan.outputs.release_action }}
+          MISSING: ${{ steps.plan.outputs.missing_assets }}
+          BASE_SHA: ${{ github.sha }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_tag="agent-forge-$TAG"
+          if test "$ACTION" = create_draft; then
+            gh release create "$release_tag" --repo 0k-lab/homebrew-tap --target "$BASE_SHA" \
+              --title "Agent Forge $TAG bottles" --notes "Homebrew bottles for Agent Forge $TAG." \
+              --draft --prerelease=false --latest=false
+          else
+            test "$ACTION" = resume_draft -o "$ACTION" = publish -o "$ACTION" = complete
+          fi
+          jq -r '.[]' <<<"$MISSING" | while IFS= read -r name; do
+            path="$(find bottle-artifacts -type f -name "$name" -print -quit)"
+            test -n "$path"
+            gh release upload "$release_tag" "$path" --repo 0k-lab/homebrew-tap
+          done
+
+      - name: Read back exact draft assets
+        id: readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_tag="agent-forge-$TAG"
+          gh api -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/0k-lab/homebrew-tap/releases/tags/$release_tag" > release-readback.json
+          python3 - <<'PY'
+          import json
+          state = json.load(open("observed-state.json"))
+          state["release"] = json.load(open("release-readback.json"))
+          open("readback-state.json", "w").write(json.dumps(state))
+          PY
+          python3 scripts/agent_forge_bump.py state-plan --expected expected-state.json \
+            --state readback-state.json --output readback-plan.json --github-output "$GITHUB_OUTPUT"
+          mkdir release-readback
+          gh release download "$release_tag" --repo 0k-lab/homebrew-tap --dir release-readback
+          test "$(find release-readback -type f | wc -l | tr -d ' ')" = 4
+          find bottle-artifacts -type f -print0 | while IFS= read -r -d '' expected; do
+            cmp "$expected" "release-readback/$(basename "$expected")"
+          done
+
+      - name: Publish exact draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ steps.readback.outputs.release_action }}
+          BASE_SHA: ${{ github.sha }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_tag="agent-forge-$TAG"
+          if test "$ACTION" = publish; then
+            gh release edit "$release_tag" --repo 0k-lab/homebrew-tap --target "$BASE_SHA" \
+              --title "Agent Forge $TAG bottles" --notes "Homebrew bottles for Agent Forge $TAG." \
+              --draft=false --prerelease=false --latest=false
+          else
+            test "$ACTION" = complete
+          fi
+          gh api -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/0k-lab/homebrew-tap/releases/tags/$release_tag" > release-public.json
+          python3 - <<'PY'
+          import json
+          state = json.load(open("observed-state.json"))
+          state["release"] = json.load(open("release-public.json"))
+          open("public-state.json", "w").write(json.dumps(state))
+          PY
+          release_tag_sha="$(git ls-remote --tags origin "refs/tags/$release_tag" "refs/tags/$release_tag^{}" | awk 'END {print $1}')"
+          test -n "$release_tag_sha"
+          jq --arg sha "$release_tag_sha" '.release_tag_sha = $sha' public-state.json > public-state.tmp
+          mv public-state.tmp public-state.json
+          python3 scripts/agent_forge_bump.py state-plan --expected expected-state.json \
+            --state public-state.json --output final-state.json
+          test "$(jq -r .release_action final-state.json)" = complete
+
+      - name: Dispatch or reuse exact-head verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.expected.outputs.branch }}
+          BRANCH_SHA: ${{ steps.expected.outputs.branch_sha }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh run list --repo 0k-lab/homebrew-tap --workflow agent-forge-bottles.yml --branch "$BRANCH" \
+            --event workflow_dispatch --limit 100 --json databaseId,url,event,headBranch,headSha > runs-before.json
+          run="$(jq -c --arg branch "$BRANCH" --arg sha "$BRANCH_SHA" \
+            '[.[] | select(.event == "workflow_dispatch" and .headBranch == $branch and .headSha == $sha)] | sort_by(.databaseId) | last // empty' runs-before.json)"
+          if test -z "$run"; then
+            jq '[.[].databaseId]' runs-before.json > baseline-run-ids.json
+            gh workflow run agent-forge-bottles.yml --repo 0k-lab/homebrew-tap --ref "$BRANCH"
+            for attempt in $(seq 1 38); do
+              sleep 8
+              gh run list --repo 0k-lab/homebrew-tap --workflow agent-forge-bottles.yml --branch "$BRANCH" \
+                --event workflow_dispatch --limit 100 --json databaseId,url,event,headBranch,headSha > runs-after.json
+              run="$(jq -c --arg branch "$BRANCH" --arg sha "$BRANCH_SHA" --slurpfile baseline baseline-run-ids.json \
+                '[.[] | select(.event == "workflow_dispatch" and .headBranch == $branch and .headSha == $sha and (.databaseId as $id | $baseline[0] | index($id) | not))] | sort_by(.databaseId) | last // empty' runs-after.json)"
+              test -z "$run" || break
+            done
+          fi
+          test -n "$run"
+          run_id="$(jq -r .databaseId <<<"$run")"
+          run_url="$(jq -r .url <<<"$run")"
+          test "$run_id" != null -a "$run_url" != null
+          release_id="$(jq -r .release_id final-state.json)"
+          asset_ids="$(jq -c .asset_ids final-state.json)"
+          printf 'branch_sha=%s\npr_number=%s\npr_url=%s\nrelease_id=%s\nasset_ids=%s\nrun_id=%s\nrun_url=%s\n' \
+            "$BRANCH_SHA" "$PR_NUMBER" "$PR_URL" "$release_id" "$asset_ids" "$run_id" "$run_url" > state-outputs.txt
+          {
+            echo "Branch SHA: $BRANCH_SHA"
+            echo "Pull request: $PR_URL (#$PR_NUMBER)"
+            echo "Release ID: $release_id; asset IDs: $asset_ids"
+            echo "Exact-head verification: $run_url (run $run_id)"
+          } >> "$GITHUB_STEP_SUMMARY"
