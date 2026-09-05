@@ -8,13 +8,71 @@ FORMULA = ROOT / "Formula/agent-forge.rb"
 WORKFLOW = ROOT / ".github/workflows/agent-forge-bottles.yml"
 README = ROOT / "README.md"
 
-VERSION = "0.1.7"
-TAG = f"v{VERSION}"
-COMMIT = "ee034b53b5af660cfca66985959b566ecfdd0f73"
-SOURCE_SHA256 = "bec4fb1a01935d2df21166aca4d6ef7207b35fa1ecade07ca53998918f941596"
-ROOT_URL = "https://github.com/0k-lab/homebrew-tap/releases/download/agent-forge-v0.1.7-1"
-ARM64_BOTTLE_SHA256 = "ccb029de9cd5c57171dab3b3c8e8ac4d1b4128264a132f963139b0cd311926a8"
-INTEL_BOTTLE_SHA256 = "32f3e8460d4e02af444b77ef5e4354d233a1144e3fa74cf89e387b72d824558d"
+def formula_contract_identity(text):
+    bottle_markers = re.findall(r'^[ \t]*bottle[ \t]+do[ \t]*$', text, re.MULTILINE)
+    if bottle_markers != ["  bottle do"]:
+        raise ValueError("expected one canonical bottle block")
+    bottle_start = text.index("  bottle do\n")
+    bottle_end = text.index("  end\n", bottle_start)
+    preamble = text[:bottle_start]
+    bottle_block = text[bottle_start:bottle_end]
+
+    def exact_raw(scope, pattern, canonical, label):
+        raw = re.findall(pattern, scope, re.MULTILINE)
+        if len(raw) != 1:
+            raise ValueError(f"expected exactly one raw {label} directive")
+        match = re.fullmatch(canonical, raw[0])
+        if match is None:
+            raise ValueError(f"malformed {label} directive")
+        return match.groups()
+
+    tag, = exact_raw(text, r'^[ \t]*url(?:[ \t]|\().*$',
+        r'  url "https://github\.com/0k-lab/agent-forge/archive/refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz"',
+        "source URL")
+    source_sha, = exact_raw(preamble, r'^[ \t]*sha256(?:[ \t]|\().*$',
+        r'  sha256 "([0-9a-f]{64})"', "source SHA-256")
+    build_tag, = exact_raw(text, r'^.*agent-forge/internal/buildinfo\.Version=.*$',
+        r'      "-X", "agent-forge/internal/buildinfo\.Version=(v[0-9]+\.[0-9]+\.[0-9]+)",',
+        "build version")
+    build_commit, = exact_raw(text, r'^.*agent-forge/internal/buildinfo\.Commit=.*$',
+        r'      "-X", "agent-forge/internal/buildinfo\.Commit=([0-9a-f]{40})",',
+        "build commit")
+    test_commit, = exact_raw(text, r'^[ \t]*commit[ \t]*=.*$',
+        r'    commit = "([0-9a-f]{40})"', "test commit")
+    root_url, = exact_raw(bottle_block, r'^[ \t]*root_url(?:[ \t]|\().*$',
+        r'    root_url "([^"]+)"', "bottle root URL")
+    if build_tag != tag or build_commit != test_commit:
+        raise ValueError("Formula identity fields disagree")
+    if re.fullmatch(
+        rf"https://github\.com/0k-lab/homebrew-tap/releases/download/agent-forge-{re.escape(tag)}(?:-[1-9][0-9]*)?",
+        root_url,
+    ) is None:
+        raise ValueError("bottle root URL does not match Formula version")
+
+    raw_bottles = re.findall(r'^[ \t]*sha256(?:[ \t]|\().*$', bottle_block, re.MULTILINE)
+    if len(raw_bottles) != 2:
+        raise ValueError("expected exactly two raw bottle SHA-256 directives")
+    bottles = {}
+    for line in raw_bottles:
+        match = re.fullmatch(
+            r'    sha256 cellar: :any_skip_relocation, ([a-z0-9_]+): "([0-9a-f]{64})"', line)
+        if match is None or match.group(1) in bottles:
+            raise ValueError("malformed or duplicate bottle SHA-256 directive")
+        bottles[match.group(1)] = match.group(2)
+    if set(bottles) not in ({"arm64_sonoma", "sequoia"}, {"arm64_sequoia", "sequoia"}):
+        raise ValueError("unsupported bottle tag pair")
+    return {"tag": tag, "version": tag[1:], "commit": build_commit,
+            "source_sha256": source_sha, "root_url": root_url, "bottles": bottles}
+
+
+FORMULA_TEXT = FORMULA.read_text()
+IDENTITY = formula_contract_identity(FORMULA_TEXT)
+TAG = IDENTITY["tag"]
+VERSION = IDENTITY["version"]
+COMMIT = IDENTITY["commit"]
+SOURCE_SHA256 = IDENTITY["source_sha256"]
+ROOT_URL = IDENTITY["root_url"]
+
 BINARIES = {
     "forge-worker": "./cmd/forge-worker",
     "forge-codex-plugin": "./cmd/forge-codex-plugin",
@@ -56,7 +114,7 @@ class FormulaContract(unittest.TestCase):
         self.assertIn('"-trimpath"', self.text)
         self.assertIn('"-buildvcs=false"', self.text)
         self.assertIn('"-buildid="', self.text)
-        self.assertIn('"-X", "agent-forge/internal/buildinfo.Version=v0.1.7"', self.text)
+        self.assertIn(f'"-X", "agent-forge/internal/buildinfo.Version={TAG}"', self.text)
         self.assertIn(f'"-X", "agent-forge/internal/buildinfo.Commit={COMMIT}"', self.text)
         self.assertEqual(1, self.text.count('system "go", "build"'))
         self.assertIn('"-o", bin/name', self.text)
@@ -70,13 +128,27 @@ class FormulaContract(unittest.TestCase):
             self.assertNotIn(forbidden, lowered)
 
     def test_exact_published_bottles(self):
-        for required in (
-            "bottle do",
-            f'root_url "{ROOT_URL}"',
-            f'sha256 cellar: :any_skip_relocation, arm64_sonoma: "{ARM64_BOTTLE_SHA256}"',
-            f'sha256 cellar: :any_skip_relocation, sequoia: "{INTEL_BOTTLE_SHA256}"',
-        ):
-            self.assertIn(required, self.text)
+        parsed = formula_contract_identity(self.text)
+        self.assertEqual(parsed, IDENTITY)
+        self.assertEqual(2, len(parsed["bottles"]))
+
+    def test_malformed_extra_identity_and_bottle_directives_are_rejected(self):
+        mutations = (
+            lambda text: text.replace("\n  sha256 ", '\n   url("https://evil.invalid/source.tar.gz")\n  sha256 ', 1),
+            lambda text: text.replace("\n\n  bottle do", '\n   sha256("xyz")\n\n  bottle do', 1),
+            lambda text: text.replace("internal/buildinfo.Version=", "internal/buildinfo.Version=xyz\n      # agent-forge/internal/buildinfo.Version=", 1),
+            lambda text: text.replace("internal/buildinfo.Commit=", "internal/buildinfo.Commit=xyz\n      # agent-forge/internal/buildinfo.Commit=", 1),
+            lambda text: text.replace('    commit = "', '     commit = "xyz"\n    commit = "', 1),
+            lambda text: text.replace('    root_url "', '     root_url("https://evil.invalid")\n    root_url "', 1),
+            lambda text: text.replace("  end\n", '    sha256(cellar: :any_skip_relocation, ventura: "' + "1" * 64 + '")\n  end\n', 1),
+            lambda text: text.replace("  end\n", '    sha256 cellar: :any, ventura: "' + "1" * 64 + '"\n  end\n', 1),
+        )
+        for mutate in mutations:
+            changed = mutate(self.text)
+            self.assertNotEqual(changed, self.text)
+            with self.subTest(), self.assertRaises(ValueError):
+                formula_contract_identity(changed)
+
 
 
 class WorkflowContract(unittest.TestCase):
