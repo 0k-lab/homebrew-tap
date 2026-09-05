@@ -68,7 +68,8 @@ def source_tar(version="0.1.8", module="agent-forge", missing=()):
     return data.getvalue()
 
 
-def bottle_fixture(directory, tag="arm64_sequoia", arch="arm64", version="0.1.8"):
+def bottle_fixture(directory, tag="arm64_sequoia", arch="arm64", version="0.1.8", root_url=None):
+    root_url = root_url or ROOT_URL
     local = f"agent-forge--{version}.{tag}.bottle.tar.gz"
     remote = f"agent-forge-{version}.{tag}.bottle.tar.gz"
     tar_path = directory / local
@@ -91,7 +92,7 @@ def bottle_fixture(directory, tag="arm64_sequoia", arch="arm64", version="0.1.8"
                 "homepage": "https://github.com/0k-lab/agent-forge",
             },
             "bottle": {
-                "root_url": ROOT_URL, "cellar": "any_skip_relocation", "rebuild": 0,
+                "root_url": root_url, "cellar": "any_skip_relocation", "rebuild": 0,
                 "date": "2026-09-02T00:00:00Z",
                 "tags": {tag: {
                     "filename": remote, "local_filename": local, "sha256": digest,
@@ -219,27 +220,34 @@ class FormulaAndBottleTests(unittest.TestCase):
                 bump.validate_bottle(args)
 
     def test_render_final_consumes_full_json_and_new_tags(self):
+        current = bump.formula_identity(FORMULA)["version"]
+        major, minor, patch = map(int, current.split("."))
+        version = f"{major}.{minor}.{patch + 1}"
+        tag = f"v{version}"
+        root_url = f"https://github.com/0k-lab/homebrew-tap/releases/download/agent-forge-{tag}"
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             source, metadata = directory / "source.rb", directory / "upstream.json"
             metadata.write_text(json.dumps({"commit": COMMIT,
-                "source_sha256": "952fd96e058f48d5464d8528202024d77d20948c0c82b43c835b63061bf56032",
-                "source_url": "https://github.com/0k-lab/agent-forge/archive/refs/tags/v0.1.8.tar.gz",
-                "tag": "v0.1.8", "version": "0.1.8"}))
+                "source_sha256": "9" * 64,
+                "source_url": f"https://github.com/0k-lab/agent-forge/archive/refs/tags/{tag}.tar.gz",
+                "tag": tag, "version": version}))
             bump.prepare_formula(type("Args", (), {"formula": FORMULA, "metadata": metadata, "output": source}))
             artifacts = directory / "artifacts"
-            for tag, arch in (("arm64_sequoia", "arm64"), ("sequoia", "x86_64")):
-                work = directory / f"work-{tag}"
+            for bottle_tag, arch in (("arm64_sequoia", "arm64"), ("sequoia", "x86_64")):
+                work = directory / f"work-{bottle_tag}"
                 work.mkdir()
-                bottle_fixture(work, tag, arch)
-                bump.validate_bottle(type("Args", (), {"directory": work, "version": "0.1.8",
-                    "tag": tag, "root_url": ROOT_URL, "commit": COMMIT, "output": artifacts / tag}))
+                bottle_fixture(work, bottle_tag, arch, version, root_url)
+                bump.validate_bottle(type("Args", (), {"directory": work, "version": version,
+                    "tag": bottle_tag, "root_url": root_url, "commit": COMMIT,
+                    "output": artifacts / bottle_tag}))
             output, manifest = directory / "final.rb", directory / "manifest.json"
             bump.render_final(type("Args", (), {"formula": source, "artifacts": artifacts,
                                                  "output": output, "metadata": manifest}))
             self.assertIn("arm64_sequoia", output.read_text())
             self.assertNotIn("arm64_sonoma", output.read_text())
             self.assertEqual(set(json.loads(manifest.read_text())), {"arm64_sequoia", "sequoia"})
+
 
 
 class StateMachineTests(unittest.TestCase):
